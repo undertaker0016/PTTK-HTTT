@@ -5,9 +5,10 @@ session_start();
 date_default_timezone_set('Asia/Ho_Chi_Minh');
 header('Content-Type: text/html; charset=UTF-8');
 
+require_once __DIR__ . '/database.php';
+
 $appName = 'LifeBoard';
-$dbPath = __DIR__ . '/storage/personal_manager.sqlite';
-$setupError = null;
+[$db, $setupError] = initialize_database();
 
 $expenseCategories = [
     'Ăn uống',
@@ -55,35 +56,6 @@ function redirect_with_flash(string $type, string $message, string $page = 'dash
     exit;
 }
 
-function fetch_all_assoc(SQLite3Result $result): array
-{
-    $rows = [];
-    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
-        $rows[] = $row;
-    }
-
-    return $rows;
-}
-
-function fetch_one_assoc(SQLite3 $db, string $sql, array $params = []): ?array
-{
-    $stmt = $db->prepare($sql);
-    foreach ($params as $key => $value) {
-        $type = SQLITE3_TEXT;
-        if (is_int($value)) {
-            $type = SQLITE3_INTEGER;
-        } elseif (is_float($value)) {
-            $type = SQLITE3_FLOAT;
-        }
-        $stmt->bindValue($key, $value, $type);
-    }
-
-    $result = $stmt->execute();
-    $row = $result->fetchArray(SQLITE3_ASSOC);
-
-    return $row !== false ? $row : null;
-}
-
 function month_key(string $date): string
 {
     return date('Y-m', strtotime($date));
@@ -105,54 +77,7 @@ function selected_page(array $pageTitles): string
     return array_key_exists($page, $pageTitles) ? $page : 'dashboard';
 }
 
-if (!class_exists('SQLite3')) {
-    $setupError = 'PHP của bạn chưa bật extension SQLite3. Hãy bật SQLite3 trong Laragon để ứng dụng hoạt động.';
-}
-
-$db = null;
-
-if ($setupError === null) {
-    try {
-        $db = new SQLite3($dbPath);
-        if (method_exists($db, 'enableExceptions')) {
-            $db->enableExceptions(true);
-        }
-        $db->exec('PRAGMA foreign_keys = ON');
-        $db->exec(
-            'CREATE TABLE IF NOT EXISTS expenses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                amount REAL NOT NULL,
-                category TEXT NOT NULL,
-                description TEXT,
-                spent_on TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )'
-        );
-        $db->exec(
-            'CREATE TABLE IF NOT EXISTS todos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                due_date TEXT,
-                priority TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT "pending",
-                created_at TEXT NOT NULL
-            )'
-        );
-        $db->exec(
-            'CREATE TABLE IF NOT EXISTS notes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                content TEXT NOT NULL,
-                mood TEXT,
-                created_at TEXT NOT NULL
-            )'
-        );
-    } catch (Throwable $exception) {
-        $setupError = 'Không thể khởi tạo SQLite: ' . $exception->getMessage();
-    }
-}
-
-if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && $db instanceof SQLite3 && $setupError === null) {
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && $db !== null && $setupError === null) {
     $action = $_POST['action'] ?? '';
     $redirectPage = $_POST['redirect_page'] ?? 'dashboard';
     if (!array_key_exists($redirectPage, $pageTitles)) {
@@ -171,35 +96,14 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && $db instanceof SQLite3 &
                 redirect_with_flash('error', 'Vui lòng nhập đầy đủ thông tin khoản chi.', $redirectPage);
             }
 
-            if ($expenseId > 0) {
-                $stmt = $db->prepare(
-                    'UPDATE expenses
-                     SET amount = :amount, category = :category, description = :description, spent_on = :spent_on
-                     WHERE id = :id'
-                );
-                $stmt->bindValue(':id', $expenseId, SQLITE3_INTEGER);
-            } else {
-                $stmt = $db->prepare(
-                    'INSERT INTO expenses (amount, category, description, spent_on, created_at)
-                     VALUES (:amount, :category, :description, :spent_on, :created_at)'
-                );
-                $stmt->bindValue(':created_at', date('c'), SQLITE3_TEXT);
-            }
-
-            $stmt->bindValue(':amount', $amount, SQLITE3_FLOAT);
-            $stmt->bindValue(':category', $category, SQLITE3_TEXT);
-            $stmt->bindValue(':description', $description, SQLITE3_TEXT);
-            $stmt->bindValue(':spent_on', $spentOn, SQLITE3_TEXT);
-            $stmt->execute();
+            save_expense($db, $expenseId, $amount, $category, $description, $spentOn);
 
             redirect_with_flash('success', $expenseId > 0 ? 'Đã cập nhật khoản chi.' : 'Đã thêm khoản chi mới.', 'expenses');
         }
 
         if ($action === 'delete_expense') {
             $id = (int) ($_POST['id'] ?? 0);
-            $stmt = $db->prepare('DELETE FROM expenses WHERE id = :id');
-            $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
-            $stmt->execute();
+            delete_expense($db, $id);
 
             redirect_with_flash('success', 'Đã xóa khoản chi.', 'expenses');
         }
@@ -219,26 +123,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && $db instanceof SQLite3 &
                 $status = 'pending';
             }
 
-            if ($todoId > 0) {
-                $stmt = $db->prepare(
-                    'UPDATE todos
-                     SET title = :title, due_date = :due_date, priority = :priority, status = :status
-                     WHERE id = :id'
-                );
-                $stmt->bindValue(':id', $todoId, SQLITE3_INTEGER);
-            } else {
-                $stmt = $db->prepare(
-                    'INSERT INTO todos (title, due_date, priority, status, created_at)
-                     VALUES (:title, :due_date, :priority, :status, :created_at)'
-                );
-                $stmt->bindValue(':created_at', date('c'), SQLITE3_TEXT);
-            }
-
-            $stmt->bindValue(':title', $title, SQLITE3_TEXT);
-            $stmt->bindValue(':due_date', $dueDate, SQLITE3_TEXT);
-            $stmt->bindValue(':priority', $priority, SQLITE3_TEXT);
-            $stmt->bindValue(':status', $status, SQLITE3_TEXT);
-            $stmt->execute();
+            save_todo($db, $todoId, $title, $dueDate, $priority, $status);
 
             redirect_with_flash('success', $todoId > 0 ? 'Đã cập nhật công việc.' : 'Đã thêm công việc mới.', 'todos');
         }
@@ -246,21 +131,14 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && $db instanceof SQLite3 &
         if ($action === 'toggle_todo') {
             $id = (int) ($_POST['id'] ?? 0);
             $currentStatus = (string) ($_POST['current_status'] ?? 'pending');
-            $nextStatus = $currentStatus === 'done' ? 'pending' : 'done';
-
-            $stmt = $db->prepare('UPDATE todos SET status = :status WHERE id = :id');
-            $stmt->bindValue(':status', $nextStatus, SQLITE3_TEXT);
-            $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
-            $stmt->execute();
+            toggle_todo_status($db, $id, $currentStatus);
 
             redirect_with_flash('success', 'Đã cập nhật trạng thái công việc.', 'todos');
         }
 
         if ($action === 'delete_todo') {
             $id = (int) ($_POST['id'] ?? 0);
-            $stmt = $db->prepare('DELETE FROM todos WHERE id = :id');
-            $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
-            $stmt->execute();
+            delete_todo($db, $id);
 
             redirect_with_flash('success', 'Đã xóa công việc.', 'todos');
         }
@@ -275,34 +153,14 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && $db instanceof SQLite3 &
                 redirect_with_flash('error', 'Vui lòng nhập tiêu đề và nội dung ghi chú.', $redirectPage);
             }
 
-            if ($noteId > 0) {
-                $stmt = $db->prepare(
-                    'UPDATE notes
-                     SET title = :title, content = :content, mood = :mood
-                     WHERE id = :id'
-                );
-                $stmt->bindValue(':id', $noteId, SQLITE3_INTEGER);
-            } else {
-                $stmt = $db->prepare(
-                    'INSERT INTO notes (title, content, mood, created_at)
-                     VALUES (:title, :content, :mood, :created_at)'
-                );
-                $stmt->bindValue(':created_at', date('c'), SQLITE3_TEXT);
-            }
-
-            $stmt->bindValue(':title', $title, SQLITE3_TEXT);
-            $stmt->bindValue(':content', $content, SQLITE3_TEXT);
-            $stmt->bindValue(':mood', $mood, SQLITE3_TEXT);
-            $stmt->execute();
+            save_note($db, $noteId, $title, $content, $mood);
 
             redirect_with_flash('success', $noteId > 0 ? 'Đã cập nhật ghi chú.' : 'Đã lưu ghi chú mới.', 'notes');
         }
 
         if ($action === 'delete_note') {
             $id = (int) ($_POST['id'] ?? 0);
-            $stmt = $db->prepare('DELETE FROM notes WHERE id = :id');
-            $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
-            $stmt->execute();
+            delete_note($db, $id);
 
             redirect_with_flash('success', 'Đã xóa ghi chú.', 'notes');
         }
@@ -339,15 +197,10 @@ $todoChart = [];
 $topCategory = null;
 $insightText = 'Chưa có đủ dữ liệu để phân tích.';
 
-if ($db instanceof SQLite3 && $setupError === null) {
-    $expenses = fetch_all_assoc($db->query('SELECT * FROM expenses ORDER BY spent_on DESC, id DESC'));
-    $todos = fetch_all_assoc(
-        $db->query(
-            'SELECT * FROM todos
-             ORDER BY CASE WHEN status = "pending" THEN 0 ELSE 1 END, due_date IS NULL, due_date ASC, id DESC'
-        )
-    );
-    $notes = fetch_all_assoc($db->query('SELECT * FROM notes ORDER BY id DESC'));
+if ($db !== null && $setupError === null) {
+    $expenses = get_expenses($db);
+    $todos = get_todos($db);
+    $notes = get_notes($db);
 
     $currentMonth = date('Y-m');
     $today = date('Y-m-d');
@@ -442,15 +295,15 @@ if ($db instanceof SQLite3 && $setupError === null) {
     $upcomingTodos = array_slice($upcomingTodos, 0, 5);
 
     if ($currentPage === 'expenses' && isset($_GET['edit_expense'])) {
-        $editingExpense = fetch_one_assoc($db, 'SELECT * FROM expenses WHERE id = :id', [':id' => (int) $_GET['edit_expense']]);
+        $editingExpense = find_expense($db, (int) $_GET['edit_expense']);
     }
 
     if ($currentPage === 'todos' && isset($_GET['edit_todo'])) {
-        $editingTodo = fetch_one_assoc($db, 'SELECT * FROM todos WHERE id = :id', [':id' => (int) $_GET['edit_todo']]);
+        $editingTodo = find_todo($db, (int) $_GET['edit_todo']);
     }
 
     if ($currentPage === 'notes' && isset($_GET['edit_note'])) {
-        $editingNote = fetch_one_assoc($db, 'SELECT * FROM notes WHERE id = :id', [':id' => (int) $_GET['edit_note']]);
+        $editingNote = find_note($db, (int) $_GET['edit_note']);
     }
 }
 
@@ -619,7 +472,7 @@ unset($_SESSION['flash']);
                         <div class="panel__header">
                             <div>
                                 <span class="panel__eyebrow">Phân tích nhanh</span>
-                                <h3>Điểm nhấn để thuyết trình</h3>
+                                
                             </div>
                         </div>
                         <div class="highlight-box">
@@ -1102,8 +955,8 @@ unset($_SESSION['flash']);
                     <article class="panel">
                         <div class="panel__header">
                             <div>
-                                <span class="panel__eyebrow">Nhận xét</span>
-                                <h3>Điểm nhấn để báo cáo</h3>
+                                <span class="panel__eyebrow">Web Quản lí chi tiêu</span>
+                                
                             </div>
                         </div>
                         <ul class="simple-list">
@@ -1149,8 +1002,9 @@ unset($_SESSION['flash']);
             <?php endif; ?>
 
             <footer class="app-footer">
+                  <p>LifeBoard • Đồ án môn học PTTK-HTTT • thống kê quản lý chi tiêu cá nhân offline.</p>
                 <button type="button" class="footer-badge">© 2026 Quản lý chi tiêu</button>
-                <p>LifeBoard • Đồ án môn học PTTK-HTTT • Giao diện dashboard nhiều màu, thống kê quản lý chi tiêu cá nhân offline.</p>
+              
             </footer>
         </main>
     </div>
